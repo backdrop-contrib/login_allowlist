@@ -1,0 +1,260 @@
+<?php
+/**
+ * @file login_allowlist.module
+ */
+define('UNSAFE_REQUEST', 'unsafe or harmful');
+define('UA_TOO_SHORT', 3);
+
+/**
+ * Implements hook_config_info().
+ */
+function login_allowlist_config_info() {
+  $prefixes['login_allowlist.settings'] = array(
+    'label' => t('Login allowlist'),
+    'group' => t('Configuration'),
+  );
+  
+  return $prefixes;
+}
+
+/**
+ * Implements hook_permission().
+ *
+ */
+function login_allowlist_permission() {
+  return array(
+    'administer login_allowlist settings' => array(
+      'title' => t('Administer Login allowlist')
+    ),
+  );
+}
+
+/**
+ * Implements hook_menu().
+ *
+ */
+function login_allowlist_menu() {
+  $items = array();
+
+  $items['admin/config/people/login_allowlist'] = array(
+    'type' => MENU_NORMAL_ITEM,
+    'title' => 'Login allowlist',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('login_allowlist_main_settings_form'),
+    'file' => 'login_allowlist.admin.inc',
+    'access callback' => 'user_access',
+    'access arguments' => array('administer login_allowlist settings'),
+  );
+  
+  $items['admin/config/people/login_allowlist/main'] = array(
+    'title' => 'Main settings',
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+    'weight' => 1,
+  );
+
+  $items['admin/config/people/login_allowlist/ua_string'] = array(
+    'title' => 'Blocked User Agents',
+    'type' => MENU_LOCAL_TASK,
+    'page arguments' => array('login_allowlist_ua_string_form'),
+    
+    'file' => 'login_allowlist.admin.inc',
+    'access callback' => 'user_access',
+    'access arguments' => array('administer login_allowlist settings'),
+    'weight' => 2,
+  );
+
+  $items['admin/config/people/login_allowlist/ua_string/unblock/%'] = array(
+    'title' => 'Unblock UA string',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('login_allowlist_unblock', 6),
+    'access arguments' => array('administer login_allowlist settings'),
+    'file' => 'login_allowlist.admin.inc',
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_init().
+ *
+ */
+function login_allowlist_init() {
+  $do_reject        = FALSE;
+  $watchdog_message = '';
+  $r_uri            = htmlspecialchars($_SERVER['REQUEST_URI']);
+   
+  if (strpos($r_uri, 'user/') || strpos($r_uri, 'user%') !== FALSE) {
+    $ua_string = isset($_SERVER['HTTP_USER_AGENT']) ? htmlspecialchars($_SERVER['HTTP_USER_AGENT']) : '';
+    $bad_ua    = login_allowlist_bad_ua($ua_string);
+    
+    if (!empty($bad_ua)) {
+      $watchdog_message = $bad_ua;
+      $do_reject = TRUE;
+    }
+    else {
+      $request_method = $_SERVER['REQUEST_METHOD'];
+      if ($request_method == 'POST') {
+        $login_name = !empty($_POST['name']) && is_string($_POST['name']) 
+          ? htmlspecialchars($_POST['name']) 
+          : UNSAFE_REQUEST;
+
+        if ($login_name == UNSAFE_REQUEST || !login_allowlist_found($login_name)) {
+          $login_pass = !empty($_POST['pass']) && is_string($_POST['pass']) 
+            ? htmlspecialchars($_POST['pass']) 
+            : UNSAFE_REQUEST;
+          
+          $watchdog_message = 'Rejected <em>' . $login_name . '</em> request, from IP: ' . ip_address() . ', User-Agent: <em>' . $ua_string . '</em>, password being used: <em>' . $login_pass . '</em>';
+          $do_reject = TRUE;
+        } 
+      }
+    }
+  }
+  
+  if ($do_reject) {
+    login_allowlist_reject($watchdog_message);
+  }
+}
+
+/**
+ * Reject action
+ * 
+ * @param string $watchdog_message
+ */
+function login_allowlist_reject($watchdog_message = '') {
+  $config      = config('login_allowlist.settings');
+  $log_enabled = $config->get('log_enabled');
+  
+  login_allowlist_header();
+
+  if ($log_enabled) {
+    watchdog(
+      'login_allowlist',
+      $watchdog_message,
+      NULL,
+      WATCHDOG_WARNING
+    );
+  }
+
+  exit();
+}
+
+/**
+ * Check if username allowlisted
+ * 
+ * @param string $username
+ * @return boolean
+ */
+function login_allowlist_found($username = '') {
+  $found       = FALSE;
+  $config      = config('login_allowlist.settings');
+  $all_users   = $config->get('all_users');
+  $allowlisted = array();
+  
+  if($all_users) {
+    $result = db_select('users', 'u')
+        ->fields('u', array('name', 'mail'))
+        ->condition('status', 1)
+        ->execute();
+    
+    foreach ($result as $login) {
+      $allowlisted[] = $login->name;
+      $allowlisted[] = $login->mail;
+    }
+  }
+  else {
+    $allowlist   = $config->get('allowlist');
+    $allowlisted = login_allowlist_textarea_to_array($allowlist);
+  }
+  
+  if (in_array($username, $allowlisted)) {
+    $found = TRUE;
+  }
+
+  return $found;
+} 
+
+function login_allowlist_header() {
+  $config      = config('login_allowlist.settings');
+  $status_code = $config->get('status_code');
+
+  $status_string = $status_code == '403' ? ' 403 Forbidden' : ' 404 Not Found';
+
+  header($_SERVER['SERVER_PROTOCOL'] . $status_string);
+}
+
+/**
+ * Check if User-Agent string is blocked, empty or too short.
+ * @param string $ua_string
+ * @return string $message, not empty if found bad UA
+ */
+function login_allowlist_bad_ua($ua_string = '') {
+  $config      = config('login_allowlist.settings');
+  $bad_ua_list = $config->get('ua_list');
+  $too_short   = strlen($ua_string) <= UA_TOO_SHORT ? TRUE : FALSE;
+  $status_code = $config->get('status_code');
+  $message     = '';
+
+  if ($too_short) {
+    $message = 'Rejected fake User-Agent: "' . $ua_string . '" from IP: ' . ip_address();
+  }
+  elseif (is_array($bad_ua_list) && !empty($bad_ua_list)) {
+    // Check for U-A groups masked by *, then full U-A string 
+    foreach ($bad_ua_list as $bad_ua) {
+      if (substr($bad_ua, -1) == '*') {
+        $masked[] = substr($bad_ua, 0, -1);
+      }
+
+      if (!empty($masked)) {
+        foreach ($masked as $found) {
+          $position = strpos($ua_string, $found);
+          if ($position !== FALSE) {
+            $message = 'IP: ' . ip_address() . ', blocked UA: "' . $ua_string . '" rejected with code ' . $status_code;
+            continue 2;
+          }
+          else {
+            $message = login_allowlist_ua_found($ua_string, $bad_ua_list);
+          }
+        }
+      }
+      else {
+        $message = login_allowlist_ua_found($ua_string, $bad_ua_list);
+      }
+    }
+  }
+
+  return $message;
+}
+
+/**
+ * Found in array
+ * @param string $ua_string
+ * @param array $bad_ua_list
+ * @return string $message
+ */
+function login_allowlist_ua_found($ua_string, $bad_ua_list) {
+  $config      = config('login_allowlist.settings');
+  $status_code = $config->get('status_code');
+  $message     = '';
+  
+  if (in_array($ua_string, $bad_ua_list)) {
+    $message = 'IP: ' . ip_address() . ', blocked UA: "' . $ua_string . '" rejected with code ' . $status_code;
+  }
+  return $message;
+}
+
+/**
+ * Utility function
+ * @param string $raw_string
+ * @return array of strings saved via textarea
+ */
+function login_allowlist_textarea_to_array($raw_string = '') {
+  $array_of_strings = array();
+  
+  if (!empty($raw_string)) {
+    $raw_array = preg_split("/\\r\\n|\\r|\\n/", $raw_string);
+    
+    $array_of_strings = array_map('trim', $raw_array);
+  }
+  return $array_of_strings;
+}

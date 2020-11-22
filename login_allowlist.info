@@ -1,0 +1,8 @@
+name = Login allowlist
+description = Limit access to your site to only certain users.
+package = Spam control
+backdrop = 1.x
+type = module
+configure = admin/config/people/login_allowlist
+version = 1.0.1
+

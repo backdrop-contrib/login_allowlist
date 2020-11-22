@@ -1,0 +1,12 @@
+{
+  "_config_name": "login_allowlist.settings",
+  "status_code": "404",
+  "all_users": 1,
+  "allowlist": "",
+  "ua_list": {
+    "abd1f3b2a10834b271bab9b316dc7dfa": "curl*",
+    "1cca1bd129fa0becd174c66d1140dacd": "Go-http-client/*",
+    "08730f8511a5d54ca6a33a8bb60b00d5": "python-requests/*"
+  },
+  "log_enabled": 0
+}
